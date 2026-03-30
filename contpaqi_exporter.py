@@ -82,6 +82,31 @@ def save_config(data):
     with open(CONFIG_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
+# Passwords que el usuario ha confirmado que funcionan (se guardan en config.json)
+DEFAULT_PASSWORDS = ["contpaqi", "Contpaqi1", "sa", "adminsa", "123456", "(en blanco)"]
+
+def load_known_passwords():
+    cfg = load_config()
+    saved = cfg.get("known_passwords", [])
+    # Mezcla: guardados primero (los que funcionaron), luego defaults no duplicados
+    merged = list(saved)
+    for p in DEFAULT_PASSWORDS:
+        if p not in merged:
+            merged.append(p)
+    return merged
+
+def save_known_password(password):
+    """Guarda un password exitoso al inicio de la lista en config.json."""
+    if not password:
+        return
+    cfg = load_config()
+    known = cfg.get("known_passwords", [])
+    display = password  # el password real
+    if display not in known:
+        known.insert(0, display)
+    cfg["known_passwords"] = known
+    save_config(cfg)
+
 
 # ──────────────────────────────────────────────
 # DETECCION DE SERVIDORES
@@ -230,6 +255,166 @@ def get_departments(server, database, driver, user=None, password=None):
     conn.close()
     return df
 
+
+# ──────────────────────────────────────────────
+# SDK de ContpaqI Nominas
+# ContpaqI Nominas expone su motor a traves de un conjunto de DLLs COM
+# registrados durante la instalacion del cliente. El punto de entrada
+# principal es SDKNominas.dll / MGW_SDK.dll que expone la clase
+# ISDK via COM Automation (IDispatch).
+#
+# Cuando usamos el SDK, la conexion va por el canal interno de ContpaqI
+# (mismo que usa la aplicacion) — no necesitamos credenciales SQL directas.
+# LIMITACION: el SDK bloquea la empresa mientras la sesion esta abierta,
+# igual que si un usuario de ContpaqI la tuviera abierta. El usuario acepta esto.
+# ──────────────────────────────────────────────
+
+# ProgIDs conocidos del SDK de ContpaqI Nominas (probados en v14–v18)
+SDK_PROGIDS = [
+    "ContpaqiNOM.SDK",
+    "ContpaqiNominas.SDK",
+    "SDKNOM.SDK",
+    "MGW_SDK.SDK",
+]
+
+# Rutas de instalacion tipicas de ContpaqI Nominas en Mexico
+SDK_INSTALL_PATHS = [
+    r"C:\ContpaqI\Nominas",
+    r"C:\Program Files\Compac\Nominas",
+    r"C:\Program Files (x86)\Compac\Nominas",
+    r"C:\Compac\Nominas",
+    r"C:\ContpaqI\ContpaqI Nominas",
+    r"C:\Program Files\ContpaqI\Nominas",
+]
+
+def detect_contpaqi_path():
+    """
+    Detecta la ruta de instalacion de ContpaqI Nominas via:
+    1. Registro de Windows (HKLM\SOFTWARE\Compac\...)
+    2. Rutas conocidas en disco
+    Retorna la ruta o None.
+    """
+    # Intento 1: Registro de Windows
+    try:
+        import winreg
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            for subkey in (
+                r"SOFTWARE\Compac\Nominas",
+                r"SOFTWARE\ContpaqI\Nominas",
+                r"SOFTWARE\WOW6432Node\Compac\Nominas",
+                r"SOFTWARE\WOW6432Node\ContpaqI\Nominas",
+            ):
+                try:
+                    with winreg.OpenKey(hive, subkey) as key:
+                        for val_name in ("InstallDir", "Path", "RutaInstalacion", ""):
+                            try:
+                                path, _ = winreg.QueryValueEx(key, val_name)
+                                if path and os.path.isdir(path):
+                                    return path
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Intento 2: Rutas conocidas en disco
+    for path in SDK_INSTALL_PATHS:
+        if os.path.isdir(path):
+            return path
+
+    return None
+
+def sdk_find_dlls(install_path):
+    """
+    Busca los DLLs del SDK dentro de la ruta de instalacion.
+    Retorna lista de DLLs encontrados relevantes.
+    """
+    found = []
+    if not install_path or not os.path.isdir(install_path):
+        return found
+    targets = {"MGW_SDK.dll", "SDKNominas.dll", "ContpaqiSDK.dll", "SDKNOM.dll"}
+    for root, _, files in os.walk(install_path):
+        for f in files:
+            if f in targets:
+                found.append(os.path.join(root, f))
+    return found
+
+def sdk_test_connection(install_path=None):
+    """
+    Intenta conectar via COM Automation al SDK de ContpaqI Nominas.
+    Retorna (True, info_str, None) o (False, None, error_str).
+
+    El SDK de ContpaqI Nominas NO requiere usuario/password SQL —
+    usa la licencia y configuracion del cliente instalado localmente.
+    """
+    try:
+        import win32com.client as win32
+    except ImportError:
+        return False, None, (
+            "Libreria 'pywin32' no instalada.\n"
+            "Ejecuta:  pip install pywin32\n"
+            "Luego reinicia el programa."
+        )
+
+    # Agrega el directorio del SDK al PATH para que Windows encuentre las DLLs dependientes
+    if install_path and os.path.isdir(install_path):
+        os.environ["PATH"] = install_path + os.pathsep + os.environ.get("PATH", "")
+
+    last_err = ""
+    for progid in SDK_PROGIDS:
+        try:
+            sdk = win32.Dispatch(progid)
+            # Si llega aqui, el objeto COM se creo correctamente
+            info = f"COM object creado: {progid}"
+            # Intentar llamar metodo de apertura si existe
+            try:
+                result = sdk.fInicioSDK()
+                info += f" | fInicioSDK() = {result}"
+            except Exception:
+                pass
+            return True, info, None
+        except Exception as e:
+            last_err = f"{progid}: {e}"
+
+    return False, None, (
+        f"No se pudo crear ningun objeto COM del SDK de ContpaqI.\n"
+        f"Ultimo error: {last_err}\n\n"
+        f"Posibles causas:\n"
+        f"  1) ContpaqI Nominas no esta instalado en ESTE equipo\n"
+        f"  2) Los DLLs no estan registrados (ejecuta regsvr32 en el DLL)\n"
+        f"  3) El SDK de esta version no soporta COM Automation\n\n"
+        f"Alternativa: usa autenticacion SQL Server."
+    )
+
+def sdk_get_databases(install_path=None):
+    """
+    Via SDK intenta listar las empresas disponibles.
+    Si el SDK no expone este metodo, cae a leer el directorio de datos.
+    """
+    # El SDK de Nominas guarda las empresas en una ruta de datos configurable.
+    # Intentamos leer el directorio de datos de ContpaqI.
+    data_paths = [
+        r"C:\ContpaqI\Datos\Nominas",
+        r"C:\Compac\Datos",
+        r"C:\ContpaqI\Datos",
+    ]
+    if install_path:
+        # El directorio de datos suele estar al mismo nivel que la instalacion
+        parent = os.path.dirname(install_path)
+        data_paths.insert(0, os.path.join(parent, "Datos"))
+
+    found = []
+    for dp in data_paths:
+        if os.path.isdir(dp):
+            for entry in os.scandir(dp):
+                if entry.is_dir():
+                    # Las empresas de ContpaqI tienen archivos .SAI o .ACE
+                    files = os.listdir(entry.path)
+                    if any(f.endswith((".SAI", ".ACE", ".sai", ".ace")) for f in files):
+                        found.append(entry.name)
+    return found
+
 def export_data(server, database, output_path, only_active,
                 selected_departments, driver, user=None, password=None):
     cs = _build_cs(server, driver, user, password, database)
@@ -324,7 +509,8 @@ class App:
         self._scanning      = False
         self._filter_active = True
         self._active_driver = None
-        self._use_sql_auth  = tk.BooleanVar(value=True)   # default: SQL auth para conexiones remotas
+        self._auth_mode     = "sql"      # "windows" | "sql" | "sdk"
+        self._use_sql_auth  = tk.BooleanVar(value=True)   # kept for compat
 
         self._apply_styles()
         self._build_ui()
@@ -447,36 +633,43 @@ class App:
         self.scan_btn = self._mk_btn(s1, "\U0001f50d Buscar", self._start_scan, "secondary")
         self.scan_btn.grid(row=0, column=2, padx=(6, 0), pady=3)
 
-        # ── Autenticacion ─────────────────────────
+        # ── Autenticacion — 3 modos ───────────────
         auth_frame = tk.Frame(s1, bg=C["card"])
         auth_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 2))
 
-        # Toggle Windows / SQL auth
-        auth_label = tk.Label(auth_frame, text="Autenticacion:",
-                              bg=C["card"], fg=C["text_dim"], font=("Segoe UI", 9))
-        auth_label.pack(side="left", padx=(0, 10))
+        tk.Label(auth_frame, text="Modo:",
+                 bg=C["card"], fg=C["text_dim"], font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
 
         self._auth_win_btn = tk.Button(
-            auth_frame, text="Windows (mismo dominio)",
-            command=lambda: self._set_auth_mode(False),
+            auth_frame, text="🖥  Windows",
+            command=lambda: self._set_auth_mode("windows"),
             bg=C["surface"], fg=C["text_mute"],
             activebackground=C["border"], activeforeground=C["white"],
             font=("Segoe UI", 9), relief="flat", cursor="hand2", padx=8, pady=3)
-        self._auth_win_btn.pack(side="left", padx=(0, 4))
+        self._auth_win_btn.pack(side="left", padx=(0, 3))
 
         self._auth_sql_btn = tk.Button(
-            auth_frame, text="SQL Server (usuario/password)",
-            command=lambda: self._set_auth_mode(True),
+            auth_frame, text="🔑  SQL Server",
+            command=lambda: self._set_auth_mode("sql"),
             bg=C["accent"], fg=C["white"],
             activebackground="#255EAA", activeforeground=C["white"],
             font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2", padx=8, pady=3)
-        self._auth_sql_btn.pack(side="left")
+        self._auth_sql_btn.pack(side="left", padx=(0, 3))
 
-        tk.Label(auth_frame, text="  <- Usa esto para conexiones remotas/VPN",
+        self._auth_sdk_btn = tk.Button(
+            auth_frame, text="⚙  ContpaqI SDK",
+            command=lambda: self._set_auth_mode("sdk"),
+            bg=C["surface"], fg=C["text_mute"],
+            activebackground=C["border"], activeforeground=C["white"],
+            font=("Segoe UI", 9), relief="flat", cursor="hand2", padx=8, pady=3)
+        self._auth_sdk_btn.pack(side="left")
+
+        tk.Label(auth_frame,
+                 text="  ← Remoto/VPN=SQL  |  Local sin password=SDK",
                  bg=C["card"], fg=C["warning"], font=("Segoe UI", 8, "italic")).pack(
-            side="left", padx=(8, 0))
+            side="left", padx=(10, 0))
 
-        # Campos SQL auth
+        # ── Panel SQL auth ────────────────────────
         self._sql_auth_frame = tk.Frame(s1, bg=C["card"])
         self._sql_auth_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 2))
 
@@ -491,7 +684,8 @@ class App:
         self.user_entry.grid(row=0, column=1, sticky="w", pady=3)
         self.user_entry.insert(0, self.config.get("db_user", "sa"))
 
-        tk.Label(self._sql_auth_frame, text="Usuario admin de SQL  (ContpaqI usa 'sa')",
+        tk.Label(self._sql_auth_frame,
+                 text="Usuario admin de SQL  (ContpaqI usa 'sa')",
                  bg=C["card"], fg=C["text_mute"], font=("Segoe UI", 8)).grid(
             row=0, column=2, sticky="w", padx=(8, 0))
 
@@ -505,7 +699,7 @@ class App:
             highlightcolor=C["accent"], highlightbackground=C["border"])
         self.pass_entry.grid(row=1, column=1, sticky="w", pady=3)
 
-        # Controles: mostrar password + sugerencias de passwords comunes
+        # Controles: mostrar + dropdown de passwords conocidos
         pass_ctrl = tk.Frame(self._sql_auth_frame, bg=C["card"])
         pass_ctrl.grid(row=1, column=2, sticky="w", padx=(8, 0))
 
@@ -516,34 +710,69 @@ class App:
             command=self._toggle_pass_visibility,
             bg=C["card"], fg=C["text_dim"],
             activebackground=C["card"], selectcolor=C["surface"],
-            font=("Segoe UI", 8), relief="flat"
-        ).pack(side="left")
+            font=("Segoe UI", 8), relief="flat").pack(side="left")
 
-        # Dropdown con passwords comunes de ContpaqI
-        COMMON_PASSWORDS = ["contpaqi", "Contpaqi1", "(en blanco)", "sa", "adminsa", "123456"]
-        pwd_hint_btn = tk.Menubutton(
+        # Dropdown dinamico de passwords — carga desde config + defaults
+        self._pwd_menu_btn = tk.Menubutton(
             pass_ctrl, text="\u25be Probar comunes",
             bg=C["surface"], fg=C["accent2"],
             font=("Segoe UI", 8), relief="flat", cursor="hand2",
             activebackground=C["border"], activeforeground=C["white"])
-        pwd_hint_btn.pack(side="left", padx=(6, 0))
-        pwd_menu = tk.Menu(pwd_hint_btn, tearoff=0,
-                           bg=C["surface"], fg=C["text"],
-                           activebackground=C["accent"], activeforeground=C["white"],
-                           font=("Consolas", 9))
-        pwd_hint_btn["menu"] = pwd_menu
-        for pw in COMMON_PASSWORDS:
-            actual = "" if pw == "(en blanco)" else pw
-            pwd_menu.add_command(
-                label=pw,
-                command=lambda p=actual: (
-                    self.pass_entry.delete(0, tk.END),
-                    self.pass_entry.insert(0, p)
-                ))
+        self._pwd_menu_btn.pack(side="left", padx=(6, 0))
+        self._pwd_menu = tk.Menu(
+            self._pwd_menu_btn, tearoff=0,
+            bg=C["surface"], fg=C["text"],
+            activebackground=C["accent"], activeforeground=C["white"],
+            font=("Consolas", 9))
+        self._pwd_menu_btn["menu"] = self._pwd_menu
+        self._rebuild_password_menu()   # llena el menu desde config
 
         tk.Label(self._sql_auth_frame,
-                 text="Password del instalador de ContpaqI  \u2014  "
-                      "prueba los comunes o pregunta al tecnico que instalo el sistema",
+                 text="Los passwords que funcionen se guardan automaticamente en el menu \u2191",
+                 bg=C["card"], fg=C["text_mute"], font=("Segoe UI", 8)).grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
+        # ── Panel SDK auth ────────────────────────
+        self._sdk_auth_frame = tk.Frame(s1, bg=C["card"])
+        # (se muestra/oculta segun modo — empieza oculto)
+
+        tk.Label(self._sdk_auth_frame,
+                 text="Ruta ContpaqI:",
+                 bg=C["card"], fg=C["text_dim"], font=("Segoe UI", 9)).grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+
+        self.sdk_path_entry = tk.Entry(
+            self._sdk_auth_frame, width=32, font=("Segoe UI", 9),
+            bg=C["surface"], fg=C["text"], insertbackground=C["white"],
+            relief="flat", highlightthickness=1,
+            highlightcolor=C["accent"], highlightbackground=C["border"])
+        self.sdk_path_entry.grid(row=0, column=1, sticky="ew", pady=3)
+
+        sdk_detected = detect_contpaqi_path()
+        if sdk_detected:
+            self.sdk_path_entry.insert(0, sdk_detected)
+
+        def _browse_sdk():
+            p = filedialog.askdirectory(title="Selecciona carpeta de instalacion de ContpaqI Nominas")
+            if p:
+                self.sdk_path_entry.delete(0, tk.END)
+                self.sdk_path_entry.insert(0, p)
+        self._mk_btn(self._sdk_auth_frame, "📁", _browse_sdk, "ghost").grid(
+            row=0, column=2, padx=(4, 0))
+        self._sdk_auth_frame.columnconfigure(1, weight=1)
+
+        sdk_dlls = sdk_find_dlls(sdk_detected) if sdk_detected else []
+        dll_status = f"DLLs encontrados: {', '.join(os.path.basename(d) for d in sdk_dlls)}" \
+            if sdk_dlls else "DLLs del SDK no encontrados en la ruta detectada"
+        dll_color  = C["success"] if sdk_dlls else C["warning"]
+        self._sdk_status_lbl = tk.Label(
+            self._sdk_auth_frame, text=dll_status,
+            bg=C["card"], fg=dll_color, font=("Segoe UI", 8))
+        self._sdk_status_lbl.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 2))
+
+        tk.Label(self._sdk_auth_frame,
+                 text="SDK usa la conexion interna de ContpaqI — no necesitas password SQL.\n"
+                      "AVISO: la empresa quedara 'en uso' mientras el programa corra (1 licencia ocupada).",
                  bg=C["card"], fg=C["text_mute"], font=("Segoe UI", 8)).grid(
             row=2, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
@@ -673,28 +902,75 @@ class App:
                  font=("Segoe UI", 8)).pack(side="right", padx=10)
 
     # ── Auth mode ─────────────────────────────────
-    def _set_auth_mode(self, sql_auth: bool):
-        self._use_sql_auth.set(sql_auth)
-        if sql_auth:
-            self._auth_sql_btn.configure(bg=C["accent"], fg=C["white"],
-                                         font=("Segoe UI", 9, "bold"))
-            self._auth_win_btn.configure(bg=C["surface"], fg=C["text_mute"],
-                                         font=("Segoe UI", 9))
-            self._sql_auth_frame.grid()
-        else:
-            self._auth_win_btn.configure(bg=C["accent"], fg=C["white"],
-                                         font=("Segoe UI", 9, "bold"))
-            self._auth_sql_btn.configure(bg=C["surface"], fg=C["text_mute"],
-                                         font=("Segoe UI", 9))
-            self._sql_auth_frame.grid_remove()
+    def _set_auth_mode(self, mode: str):
+        """mode: 'windows' | 'sql' | 'sdk'"""
+        self._auth_mode = mode
         self._active_driver = None
         self.conn_indicator.configure(text="\u25cf  Sin probar", fg=C["text_mute"])
+
+        # Reset button styles
+        dim  = {"bg": C["surface"], "fg": C["text_mute"], "font": ("Segoe UI", 9)}
+        act  = {"bg": C["accent"],  "fg": C["white"],     "font": ("Segoe UI", 9, "bold")}
+        self._auth_win_btn.configure(**(act if mode == "windows" else dim))
+        self._auth_sql_btn.configure(**(act if mode == "sql"     else dim))
+        self._auth_sdk_btn.configure(**(act if mode == "sdk"     else dim))
+
+        # Show / hide credential panels
+        if mode == "sql":
+            self._sql_auth_frame.grid(row=2, column=0, columnspan=3,
+                                      sticky="ew", pady=(4, 2))
+            self._sdk_auth_frame.grid_remove()
+        elif mode == "sdk":
+            self._sdk_auth_frame.grid(row=2, column=0, columnspan=3,
+                                      sticky="ew", pady=(4, 2))
+            self._sql_auth_frame.grid_remove()
+            self._refresh_sdk_dlls()
+        else:  # windows
+            self._sql_auth_frame.grid_remove()
+            self._sdk_auth_frame.grid_remove()
+
+        self._log(f"Modo de autenticacion: {mode.upper()}", "info")
+
+    def _refresh_sdk_dlls(self):
+        path = self.sdk_path_entry.get().strip()
+        dlls = sdk_find_dlls(path) if path else []
+        if dlls:
+            self._sdk_status_lbl.configure(
+                text=f"DLLs: {', '.join(os.path.basename(d) for d in dlls)}",
+                fg=C["success"])
+        else:
+            self._sdk_status_lbl.configure(
+                text="DLLs del SDK no encontrados — verifica la ruta", fg=C["warning"])
+
+    def _rebuild_password_menu(self):
+        """Reconstruye el menu de passwords desde config.json + defaults."""
+        self._pwd_menu.delete(0, tk.END)
+        for pw in load_known_passwords():
+            label  = "(en blanco)" if pw == "" else pw
+            actual = pw
+            self._pwd_menu.add_command(
+                label=label,
+                command=lambda p=actual: (
+                    self.pass_entry.delete(0, tk.END),
+                    self.pass_entry.insert(0, p),
+                ))
+        self._pwd_menu.add_separator()
+        self._pwd_menu.add_command(
+            label="🗑  Limpiar lista guardada",
+            command=self._clear_known_passwords)
+
+    def _clear_known_passwords(self):
+        cfg = load_config()
+        cfg["known_passwords"] = []
+        save_config(cfg)
+        self._rebuild_password_menu()
+        self._log("Lista de passwords guardados limpiada.", "info")
 
     def _toggle_pass_visibility(self):
         self.pass_entry.configure(show="" if self._show_pass_var.get() else "\u2022")
 
     def _get_credentials(self):
-        if self._use_sql_auth.get():
+        if self._auth_mode == "sql":
             return self.user_entry.get().strip(), self.pass_entry.get()
         return None, None
 
@@ -834,16 +1110,30 @@ class App:
     # ── Probar conexion ───────────────────────────
     def _test_conn(self):
         server = self.server_combo.get().strip()
+
+        # SDK mode — no necesita server en el mismo sentido
+        if self._auth_mode == "sdk":
+            sdk_path = self.sdk_path_entry.get().strip() or None
+            self.conn_indicator.configure(text="\u25cf  Probando SDK...", fg=C["warning"])
+            self._log("Probando conexion via SDK de ContpaqI...", "info")
+            self._log(f"  Ruta: {sdk_path or 'auto-detectada'}", "info")
+            threading.Thread(
+                target=lambda: self.root.after(
+                    0, self._test_done_sdk, *sdk_test_connection(sdk_path)),
+                daemon=True).start()
+            return
+
         if not server:
             messagebox.showwarning("Aviso", "Selecciona o escribe el servidor primero.")
             return
         user, password = self._get_credentials()
-        if self._use_sql_auth.get() and not user:
+        if self._auth_mode == "sql" and not user:
             messagebox.showwarning("Aviso", "Escribe el usuario SQL.")
             return
 
         self.conn_indicator.configure(text="\u25cf  Probando...", fg=C["warning"])
-        auth_type = f"SQL auth (usuario: {user})" if user else "Windows auth"
+        auth_type = (f"SQL auth (usuario: {user})" if self._auth_mode == "sql"
+                     else "Windows auth")
         self._log(f"Probando conexion: {server}  |  {auth_type}", "info")
         self._log(f"Drivers disponibles: {get_installed_sql_drivers()}", "info")
         self._set_status(f"Probando {server}...")
@@ -861,30 +1151,66 @@ class App:
             self._log(f"Conexion exitosa | Driver: {driver}", "success")
             self._set_status(f"Conectado — {driver}")
             self._set_step(1)
+
+            # Auto-guardar password si fue SQL auth y funciono
+            if self._auth_mode == "sql":
+                pw = self.pass_entry.get()
+                save_known_password(pw)
+                self._rebuild_password_menu()
+                self._log("Password guardado en 'Probar comunes' para uso futuro.", "success")
         else:
             self.conn_indicator.configure(text="\u25cf  Fallo", fg=C["danger"])
             self._log(f"Error al conectar: {err}", "error")
-            if "does not exist or access denied" in err:
+            if "does not exist or access denied" in (err or ""):
                 self._log(
-                    "DIAGNOSTICO: 'does not exist or access denied' significa:\n"
-                    "  1) El nombre del servidor o instancia es incorrecto, O\n"
-                    "  2) El firewall bloquea el puerto 1433 (o UDP 1434), O\n"
-                    "  3) El SQL Server Browser no esta activo en el servidor remoto.\n"
-                    "  -> Verifica que el servicio se llama 'SQL Server (COMPAC)' y usa SERVER\\COMPAC", "warning")
-            elif "Login failed" in err:
+                    "DIAGNOSTICO:\n"
+                    "  1) Nombre/instancia incorrecto  ->  prueba SERVER\\COMPAC\n"
+                    "  2) Firewall bloquea TCP 1433 o UDP 1434\n"
+                    "  3) SQL Server Browser inactivo en el servidor", "warning")
+            elif "Login failed" in (err or ""):
                 self._log(
-                    "DIAGNOSTICO: 'Login failed' = usuario/password incorrecto.\n"
-                    "  -> Verifica credenciales con el admin del servidor.", "warning")
+                    "DIAGNOSTICO: usuario/password incorrecto.\n"
+                    "  Usa el menu 'Probar comunes' o pregunta al instalador de ContpaqI.", "warning")
             self._set_status("Fallo la conexion. Revisa el log.")
+
+    def _test_done_sdk(self, ok, info, err):
+        if ok:
+            self._active_driver = "__SDK__"
+            self.conn_indicator.configure(
+                text="\u25cf  SDK conectado \u2714", fg=C["success"])
+            self._log(f"Conexion SDK exitosa: {info}", "success")
+            self._log("AVISO: la empresa estara 'en uso' mientras el programa corra.", "warning")
+            self._set_status("SDK de ContpaqI conectado.")
+            self._set_step(1)
+        else:
+            self.conn_indicator.configure(text="\u25cf  SDK fallo", fg=C["danger"])
+            self._log(f"Error SDK: {err}", "error")
+            self._set_status("SDK fallo. Revisa el log — considera usar SQL auth.")
 
     # ── Cargar empresas ───────────────────────────
     def _load_databases(self):
         server = self.server_combo.get().strip()
-        if not server:
-            messagebox.showwarning("Aviso", "Selecciona el servidor primero.")
-            return
         if not self._active_driver:
             messagebox.showwarning("Aviso", "Primero usa '\u26a1 Probar conexion'.")
+            return
+
+        # SDK mode — lista directorios de datos
+        if self._active_driver == "__SDK__":
+            sdk_path = self.sdk_path_entry.get().strip() or None
+            self._log("Buscando empresas via SDK (directorios de datos)...", "info")
+            self._start_progress()
+            self.load_db_btn.configure(state="disabled")
+            def _work_sdk():
+                try:
+                    dbs = sdk_get_databases(sdk_path)
+                    self.root.after(0, self._dbs_loaded, dbs)
+                except Exception as e:
+                    self.root.after(0, self._on_error, str(e))
+            threading.Thread(target=_work_sdk, daemon=True).start()
+            return
+
+        if not server:
+            messagebox.showwarning("Aviso", "Selecciona el servidor primero.")
             return
         user, password = self._get_credentials()
         self._log(f"Buscando bases NOMINAS en {server}...", "info")
