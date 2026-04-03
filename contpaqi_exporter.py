@@ -1,5 +1,5 @@
 # ==========================
-# contpaqi_export_pro.py (ULTRA PRO v11)
+# contpaqi_export_pro.py (ULTRA PRO v12 - Dual Schema Auto-Detect)
 # Excel SolutionsV — Exportador de Nominas ContpaqI
 # ==========================
 
@@ -13,13 +13,17 @@ import pyodbc
 import pandas as pd
 import json
 import os
+import warnings
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+
+# Suppress the pandas SQLAlchemy warning since we are using pyodbc directly
+warnings.filterwarnings('ignore', category=UserWarning, module='pandas')
 
 CONFIG_FILE = "config.json"
 
 # ──────────────────────────────────────────────
-# ODBC: drivers a intentar en orden de preferencia
+# ODBC DRIVERS
 # ──────────────────────────────────────────────
 ODBC_DRIVERS_PRIORITY = [
     "ODBC Driver 17 for SQL Server",
@@ -39,7 +43,6 @@ def pick_best_driver():
         if d in installed:
             return d
     return installed[0] if installed else None
-
 
 # ──────────────────────────────────────────────
 # COLORES
@@ -65,7 +68,6 @@ C = {
 }
 
 STEPS = ["1  Servidor", "2  Empresa", "3  Departamentos", "4  Exportar"]
-
 
 # ──────────────────────────────────────────────
 # CONFIG & EXPANDED PASSWORDS
@@ -107,19 +109,16 @@ def save_known_password(password):
     cfg["known_passwords"] = known
     save_config(cfg)
 
-
 # ──────────────────────────────────────────────
 # DETECCION DE SERVIDORES
 # ──────────────────────────────────────────────
 def _net_use_hosts():
     hosts = set()
     try:
-        r = subprocess.run(["net", "use"], capture_output=True, text=True,
-                           timeout=6, encoding="cp850", errors="replace")
+        r = subprocess.run(["net", "use"], capture_output=True, text=True, timeout=6, encoding="cp850", errors="replace")
         for m in re.finditer(r"\\\\([^\\]+)\\", r.stdout):
             h = m.group(1).strip()
-            if h:
-                hosts.add(h)
+            if h: hosts.add(h)
     except Exception:
         pass
     return hosts
@@ -131,8 +130,7 @@ def _sqlcmd_servers():
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
             for line in r.stdout.splitlines():
                 s = line.strip()
-                if s and not s.lower().startswith("server"):
-                    found.add(s)
+                if s and not s.lower().startswith("server"): found.add(s)
         except Exception:
             pass
     return found
@@ -147,8 +145,7 @@ def _registry_instances():
             while True:
                 try:
                     name, _, _ = winreg.EnumValue(key, i)
-                    found.add("(local)" if name.upper() == "MSSQLSERVER"
-                              else f"(local)\\{name}")
+                    found.add("(local)" if name.upper() == "MSSQLSERVER" else f"(local)\\{name}")
                     i += 1
                 except OSError:
                     break
@@ -160,27 +157,18 @@ def detect_sql_servers():
     found = set()
     found |= _sqlcmd_servers()
     found |= _registry_instances()
-
     for host in _net_use_hosts():
-        found.add(f"{host}\\COMPAC")
-        found.add(host)
-        found.add(f"{host}\\SQLEXPRESS")
-        found.add(f"{host}\\MSSQLSERVER")
-
-    for d in ["(local)\\COMPAC", "(local)", "localhost\\COMPAC",
-              "localhost", r".\COMPAC", r".\SQLEXPRESS"]:
+        found.add(f"{host}\\COMPAC"); found.add(host)
+        found.add(f"{host}\\SQLEXPRESS"); found.add(f"{host}\\MSSQLSERVER")
+    for d in ["(local)\\COMPAC", "(local)", "localhost\\COMPAC", "localhost", r".\COMPAC", r".\SQLEXPRESS"]:
         found.add(d)
 
     def key(s):
         sl = s.lower()
-        if "compac" in sl and not sl.startswith("(") and not sl.startswith(".") and not sl.startswith("local"):
-            return (0, sl)
-        if not sl.startswith("(") and not sl.startswith(".") and not sl.startswith("local"):
-            return (1, sl)
+        if "compac" in sl and not sl.startswith("(") and not sl.startswith(".") and not sl.startswith("local"): return (0, sl)
+        if not sl.startswith("(") and not sl.startswith(".") and not sl.startswith("local"): return (1, sl)
         return (2, sl)
-
     return sorted(found, key=key)
-
 
 # ──────────────────────────────────────────────
 # CONEXION SQL
@@ -190,21 +178,15 @@ def _build_cs(server, driver, user=None, password=None, database=None):
         auth = f"UID={user};PWD={password};"
     else:
         auth = "Trusted_Connection=yes;"
-
     cs = f"DRIVER={{{driver}}};SERVER={server};{auth}"
-    if database:
-        cs += f"DATABASE={database};"
+    if database: cs += f"DATABASE={database};"
     return cs
 
 def test_connection(server, user=None, password=None, timeout=8):
     installed = get_installed_sql_drivers()
-    if not installed:
-        return False, None, "No hay ningun driver ODBC de SQL Server instalado."
-
+    if not installed: return False, None, "No hay ningun driver ODBC de SQL Server instalado."
     last_err = ""
-    to_try = [d for d in ODBC_DRIVERS_PRIORITY if d in installed]
-    to_try += [d for d in installed if d not in ODBC_DRIVERS_PRIORITY]
-
+    to_try = [d for d in ODBC_DRIVERS_PRIORITY if d in installed] + [d for d in installed if d not in ODBC_DRIVERS_PRIORITY]
     for driver in to_try:
         try:
             cs = _build_cs(server, driver, user, password)
@@ -213,7 +195,6 @@ def test_connection(server, user=None, password=None, timeout=8):
             return True, driver, None
         except Exception as e:
             last_err = str(e)
-
     return False, None, last_err
 
 def get_databases(server, driver, user=None, password=None):
@@ -229,16 +210,21 @@ def get_departments(server, database, driver, user=None, password=None):
     cs = _build_cs(server, driver, user, password, database)
     conn = pyodbc.connect(cs, timeout=15)
     cursor = conn.cursor()
-    cursor.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'nom10003'")
+    
+    # Auto-detect table schema
+    cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN ('nom10003', 'NomDepartamento')")
+    tables = [r[0].lower() for r in cursor.fetchall()]
+    dept_table = 'nom10003' if 'nom10003' in tables else 'NomDepartamento'
+    
+    cursor.execute(f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{dept_table}'")
     cols = [r[0].lower() for r in cursor.fetchall()]
     
     dept_id = "idDepartamento" if "iddepartamento" in cols else "cIdDepartamento"
     dept_desc = "Descripcion" if "descripcion" in cols else "cNombreDepartamento"
     
-    df = pd.read_sql(f"SELECT {dept_id} AS Id, {dept_desc} AS Descripcion FROM nom10003 ORDER BY {dept_desc}", conn)
+    df = pd.read_sql(f"SELECT {dept_id} AS Id, {dept_desc} AS Descripcion FROM {dept_table} ORDER BY {dept_desc}", conn)
     conn.close()
     return df
-
 
 # ──────────────────────────────────────────────
 # SDK de ContpaqI Nominas
@@ -248,8 +234,7 @@ SDK_INSTALL_PATHS = [r"C:\ContpaqI\Nominas", r"C:\Program Files\Compac\Nominas",
 
 def detect_contpaqi_path():
     for path in SDK_INSTALL_PATHS:
-        if os.path.isdir(path):
-            return path
+        if os.path.isdir(path): return path
     return None
 
 def sdk_test_connection(install_path=None):
@@ -259,59 +244,81 @@ def sdk_test_connection(install_path=None):
         f"Por favor, continua usando la autenticacion SQL Server, es mas rapida y estable."
     )
 
+# ──────────────────────────────────────────────
+# EXPORTAR DATOS (DUAL SCHEMA AUTO-DETECT)
+# ──────────────────────────────────────────────
+def _get_col(cols, possible_names):
+    """Helper to find the correct column name from a list of possibilities"""
+    for p in possible_names:
+        if p.lower() in cols: return p
+    return None
 
-# ──────────────────────────────────────────────
-# EXPORTAR DATOS (DYNAMIC SCHEMA ENGINE)
-# ──────────────────────────────────────────────
 def export_data(server, database, output_path, only_active, selected_departments, driver, user=None, password=None):
     cs = _build_cs(server, driver, user, password, database)
     conn = pyodbc.connect(cs, timeout=30)
     cursor = conn.cursor()
 
-    # Introspect Nom10001 (Empleados)
-    cursor.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'nom10001'")
-    cols_10001 = [r[0].lower() for r in cursor.fetchall()]
+    # DETECT SCHEMAS
+    cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN ('nom10001', 'NomEmpleado', 'nom10003', 'NomDepartamento')")
+    tables = [r[0].lower() for r in cursor.fetchall()]
+    emp_table = 'nom10001' if 'nom10001' in tables else 'NomEmpleado'
+    dept_table = 'nom10003' if 'nom10003' in tables else 'NomDepartamento'
 
-    # Introspect Nom10003 (Departamentos)
-    cursor.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'nom10003'")
-    cols_10003 = [r[0].lower() for r in cursor.fetchall()]
+    # Introspect Empleados
+    cursor.execute(f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{emp_table}'")
+    cols_emp = [r[0].lower() for r in cursor.fetchall()]
+
+    # Introspect Departamentos
+    cursor.execute(f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{dept_table}'")
+    cols_dept = [r[0].lower() for r in cursor.fetchall()]
 
     # Stitching the RFC (Letters + Date + Homoclave)
-    rfc_sql = "E.RFC"
-    if 'fecharfc' in cols_10001 and 'homoclave' in cols_10001:
-        rfc_sql = "ISNULL(E.RFC, '') + ISNULL(E.FechaRFC, '') + ISNULL(E.Homoclave, '')"
-    elif 'crfc' in cols_10001:
-        rfc_sql = "E.cRFC"
+    rfc_p1 = _get_col(cols_emp, ['RFC', 'cRFC'])
+    rfc_p2 = _get_col(cols_emp, ['FechaRFC', 'cFechaRFC'])
+    rfc_p3 = _get_col(cols_emp, ['Homoclave', 'cHomoclave'])
+    
+    if rfc_p1 and rfc_p2 and rfc_p3:
+        rfc_sql = f"ISNULL(E.{rfc_p1}, '') + ISNULL(E.{rfc_p2}, '') + ISNULL(E.{rfc_p3}, '')"
+    elif rfc_p1:
+        rfc_sql = f"E.{rfc_p1}"
+    else:
+        rfc_sql = "''"
 
     # Stitching the CURP (First 4 + Date + Last 8)
-    curp_sql = "''"
-    if 'curpi' in cols_10001 and 'curpf' in cols_10001:
-        middle = "E.FechaRFC" if 'fecharfc' in cols_10001 else "''"
-        curp_sql = f"ISNULL(E.CURPI, '') + ISNULL({middle}, '') + ISNULL(E.CURPF, '')"
-    elif 'curp' in cols_10001: 
-        curp_sql = "E.CURP"
-    elif 'ccurp' in cols_10001: 
-        curp_sql = "E.cCURP"
+    curp_full = _get_col(cols_emp, ['CURP', 'cCURP'])
+    curpi = _get_col(cols_emp, ['CURPI', 'cCURPI'])
+    curpf = _get_col(cols_emp, ['CURPF', 'cCURPF'])
+    
+    if curpi and rfc_p2 and curpf:
+        curp_sql = f"ISNULL(E.{curpi}, '') + ISNULL(E.{rfc_p2}, '') + ISNULL(E.{curpf}, '')"
+    elif curp_full: 
+        curp_sql = f"E.{curp_full}"
+    else:
+        curp_sql = "''"
 
     # Stitching SDI
     sdi_sql = "0"
-    for c in ['sueldointegrado', 'salariodiariointegrado', 'sbcpartfija', 'sbc']:
-        if c in cols_10001:
+    for c in ['sueldointegrado', 'salariodiariointegrado', 'sbcpartfija', 'sbc', 'csueldointegrado', 'csalariodiariointegrado']:
+        if c in cols_emp:
             sdi_sql = f"E.{c}"
             break
 
     # Estatus Filter
     estatus_sql = "1=1"
-    if 'estadoempleado' in cols_10001: estatus_sql = "E.EstadoEmpleado IN ('A', 'R')"
-    elif 'cestatus' in cols_10001: estatus_sql = "E.cEstatus = 1"
+    if 'estadoempleado' in cols_emp: estatus_sql = "E.EstadoEmpleado IN ('A', 'R')"
+    elif 'cestatus' in cols_emp: estatus_sql = "E.cEstatus = 1"
 
     # Standard Fields
-    emp_dept_id = "idDepartamento" if 'iddepartamento' in cols_10001 else "cIdDepartamento"
-    cat_dept_id = "idDepartamento" if 'iddepartamento' in cols_10003 else "cIdDepartamento"
-    dept_desc   = "Descripcion" if 'descripcion' in cols_10003 else "cNombreDepartamento"
-    codigo_emp  = "CodigoEmpleado" if 'codigoempleado' in cols_10001 else "cCodigoEmpleado"
-    nombre_emp  = "NombreLargo" if 'nombrelargo' in cols_10001 else "LTRIM(RTRIM(ISNULL(E.cNombre, '') + ' ' + ISNULL(E.cApellidoPaterno, '') + ' ' + ISNULL(E.cApellidoMaterno, '')))"
-    diario_emp  = "SueldoDiario" if 'sueldodiario' in cols_10001 else "cSueldoDiario"
+    emp_dept_id = _get_col(cols_emp, ['idDepartamento', 'cIdDepartamento'])
+    cat_dept_id = _get_col(cols_dept, ['idDepartamento', 'cIdDepartamento'])
+    dept_desc   = _get_col(cols_dept, ['Descripcion', 'cNombreDepartamento'])
+    codigo_emp  = _get_col(cols_emp, ['CodigoEmpleado', 'cCodigoEmpleado'])
+    diario_emp  = _get_col(cols_emp, ['SueldoDiario', 'cSueldoDiario'])
+    
+    if 'nombrelargo' in cols_emp:
+        nombre_emp = "E.NombreLargo"
+    else:
+        nombre_emp = "LTRIM(RTRIM(ISNULL(E.cNombre, '') + ' ' + ISNULL(E.cApellidoPaterno, '') + ' ' + ISNULL(E.cApellidoMaterno, '')))"
 
     # Filtering
     where = []
@@ -332,8 +339,8 @@ def export_data(server, database, output_path, only_active, selected_departments
         E.{diario_emp}           AS [Salario Diario],
         {sdi_sql}                AS SDI,
         D.{dept_desc}            AS Departamento
-    FROM nom10001 E
-    LEFT JOIN nom10003 D ON E.{emp_dept_id} = D.{cat_dept_id}
+    FROM {emp_table} E
+    LEFT JOIN {dept_table} D ON E.{emp_dept_id} = D.{cat_dept_id}
     {wc}
     ORDER BY E.{codigo_emp}
     """
@@ -374,8 +381,9 @@ def export_data(server, database, output_path, only_active, selected_departments
         ml = max((len(str(c.value)) for c in col if c.value), default=10)
         ws.column_dimensions[col[0].column_letter].width = min(ml + 4, 50)
 
-    # Shifted Total Empleados to Column B (2) and Number to Column C (3)
+    # Shifted Total Empleados to Column B (2) and Number to Column C (3), and colored Column A
     tr = mr + 2
+    ws.cell(row=tr, column=1).fill = PatternFill(start_color="D6E4F5", end_color="D6E4F5", fill_type="solid") # Added color to Column A
     for ci, (val, align, color) in enumerate([
         ("Total Empleados:", "right", "0F1117"),
         (mr - 1, "center", BLUE)
@@ -388,7 +396,6 @@ def export_data(server, database, output_path, only_active, selected_departments
     ws.freeze_panes = "A2"
     wb.save(output_path)
     return len(df)
-
 
 # ──────────────────────────────────────────────
 # GUI
@@ -406,7 +413,7 @@ class App:
         self._scanning      = False
         self._filter_active = True
         self._active_driver = None
-        self._auth_mode     = "sql"      # "windows" | "sql" | "sdk"
+        self._auth_mode     = "sql"      
 
         self._apply_styles()
         self._build_ui()
@@ -442,7 +449,7 @@ class App:
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
         tk.Label(hdr, text="  \u2b21  Excel SolutionsV", bg=C["accent"], fg=C["white"], font=("Segoe UI", 14, "bold")).pack(side="left", padx=18, pady=10)
-        tk.Label(hdr, text="Exportador de Nominas ContpaqI (PRO v11)", bg=C["accent"], fg="#BFD9FF", font=("Segoe UI", 10)).pack(side="left", pady=10)
+        tk.Label(hdr, text="Exportador de Nominas ContpaqI (PRO v12)", bg=C["accent"], fg="#BFD9FF", font=("Segoe UI", 10)).pack(side="left", pady=10)
 
         # Pipeline stepper
         self._step_labels = []
@@ -558,7 +565,7 @@ class App:
         s2.columnconfigure(1, weight=1)
 
         # ── PASO 3: Departamentos ─────────────────
-        s3 = ttk.LabelFrame(body, text="  \U0001f4c2  Paso 3 \u2014 Departamentos  (Ctrl+clic = multiple)")
+        s3 = ttk.LabelFrame(body, text="  \U0001f4c2  Paso 3 \u2014 Departamentos  (Clic = multiple)")
         s3.pack(fill="x", pady=(0, 8))
         lw = tk.Frame(s3, bg=C["card"])
         lw.pack(fill="x")
@@ -590,7 +597,7 @@ class App:
         self.progress = ttk.Progressbar(body, mode="indeterminate")
 
         # ── Boton GENERAR ─────────────────
-        self.gen_btn = tk.Button(body, text="  \u25b6   Generar Reporte Excel", command=self._execute, bg=C["success"], fg=C["white"], activebackground="#189B52", activeforeground=C["white"], font=("Segoe UI", 12, "bold"), relief="flat", cursor="hand2", pady=14)
+        self.gen_btn = tk.Button(body, text="  \u25b6   Generar Reporte a Excel", command=self._execute, bg=C["success"], fg=C["white"], activebackground="#189B52", activeforeground=C["white"], font=("Segoe UI", 12, "bold"), relief="flat", cursor="hand2", pady=14)
         self.gen_btn.pack(fill="x", pady=(0, 10))
 
         # ── Log Panel ───────────────────────────────────
@@ -856,11 +863,11 @@ class App:
                 self.root.after(0, self._on_error, str(e))
 
         threading.Thread(target=_work, daemon=True).start()
-#
+
     def _export_done(self, n_rows, file_path):
         self.progress.stop()
         self.progress.pack_forget()
-        self.gen_btn.configure(state="normal", text="  \u25b6   Generar Reporte Excel")
+        self.gen_btn.configure(state="normal", text="  \u25b6   Generar Reporte a Excel")
         self._set_step(4)
         messagebox.showinfo("Listo \u2705", f"Exportacion exitosa\n\nEmpleados: {n_rows}\nArchivo: {file_path}")
         if messagebox.askyesno("\u00bfAbrir?", "\u00bfAbrir el Excel ahora?"):
@@ -869,7 +876,7 @@ class App:
     def _on_error(self, msg):
         self.progress.stop()
         self.progress.pack_forget()
-        self.gen_btn.configure(state="normal", text="  \u25b6   Generar Reporte Excel")
+        self.gen_btn.configure(state="normal", text="  \u25b6   Generar Reporte a Excel")
         self._log(f"ERROR: {msg}", "error")
         messagebox.showerror("Error", f"Ocurrio un error:\n\n{msg}")
 
