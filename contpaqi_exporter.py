@@ -417,9 +417,12 @@ def export_data(server, database, output_path, only_active, selected_departments
 
     # --- CORRECCIÓN: Fila de Totales en Columna B y C (Columna A libre) ---
     tr = mr + 2
+
+    # Inyectamos la formula SUBTOTAL(103, Rango) para que cuente solo las filas visibles al filtrar
+    formula_total = f"=SUBTOTAL(103, A2:A{mr})"
     
     # Se usa start=2 para que el texto "Total Empleados" inicie en B (Columna 2)
-    for ci, (val, align, color) in enumerate([("Total Empleados:", "right", "0F1117"), (mr - 1, "center", BLUE)], start=2):
+    for ci, (val, align, color) in enumerate([("Total Empleados:", "right", "0F1117"), (formula_total, "center", BLUE)], start=2):
         cell = ws.cell(row=tr, column=ci, value=val)
         cell.font = Font(bold=True, color=color, name="Calibri", size=11)
         cell.fill = PatternFill(start_color="D6E4F5", end_color="D6E4F5", fill_type="solid")
