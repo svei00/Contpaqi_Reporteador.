@@ -1,0 +1,49 @@
+# ==============================================================
+# .gitignore — contpaqi_reporteador
+# Creado en la Fase 0.5 (higiene de seguridad y repo). Ver HANDOFF.md
+# secciones 10 y 1.4/1.5 para el porqué de cada patrón.
+# ==============================================================
+
+# --- Configuración y credenciales (NUNCA versionar) ---
+# config.json guardaba la contraseña en texto plano; se deja de versionar.
+config.json
+# profiles.json es el nuevo modelo de perfiles (metadatos no secretos);
+# aun así es local por máquina y no debe subirse.
+profiles.json
+# Variables de entorno, por si se llegan a introducir.
+.env
+.env.*
+
+# --- Reportes generados con PII (RFC, CURP, salarios) ---
+# Los "Trabajadores Activos al *.xlsx" y cualquier Excel de salida.
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Entornos virtuales ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Herramientas / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Sistema operativo ---
+Thumbs.db
+Desktop.ini
+.DS_Store
