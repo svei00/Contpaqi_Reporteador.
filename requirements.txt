@@ -1,0 +1,14 @@
+# Dependencias de contpaqi_reporteador.
+# Instalar con: pip install -r requirements.txt
+#
+# keyring se agrega desde la Fase 1 (guardado seguro de contraseña en
+# Windows Credential Manager, ver HANDOFF.md Decisión 1).
+# PySide6 se agrega hasta la Fase 4 (migración de UI); se deja comentado
+# aquí para no instalarlo antes de tiempo.
+
+pyodbc>=5.1.0
+pandas>=2.2.0
+openpyxl>=3.1.2
+keyring>=25.2.0
+
+# PySide6>=6.7.0   # descomentar al iniciar la Fase 4

@@ -704,11 +704,21 @@ todo el diseño desde el inicio, aunque hoy solo lo use el despacho de Svei.
 Salida: hallazgos con evidencia (Sección 1), README confirmado, roadmap
 creado (esta sección).
 
-**Fase 0.5 — Higiene de seguridad y repo (BLOQUEANTE, hacer primero).**
+**Fase 0.5 — Higiene de seguridad y repo (BLOQUEANTE, hacer primero).** ✅
+*Completada.*
 Acciones de la Sección 10.
 Criterio de salida: `.gitignore` en su lugar; `config.json` y `*.xlsx` fuera
 de tracking; contraseña ya no en texto plano en el árbol de trabajo;
 `requirements.txt` creado.
+**[R3] Hecho:** `.gitignore` creado; `config.json` y el `.xlsx` que sí estaba
+trackeado (`Trabajadores Activos al 01-04-2026.xlsx` — hallazgo nuevo, no
+detectado en la auditoría original: los otros 9 nunca se habían subido) salieron
+de tracking vía `git rm --cached` (archivos conservados en disco); `requirements.txt`
+creado con `pyodbc`, `pandas`, `openpyxl`, `keyring` pinneados y `PySide6`
+comentado para la Fase 4. Pendiente de decisión de Svei: purgar del historial
+la contraseña `Compac1` commiteada en `4620e7c` (ver Sección 10, punto 4) —
+no se hizo porque es acción destructiva sobre historial que requiere
+confirmación explícita.
 
 **Fase 1 — Memoria de entorno y credenciales (Decisión 1).**
 Perfiles multi-empresa aislados; `profiles.json` sin secretos; contraseña en
