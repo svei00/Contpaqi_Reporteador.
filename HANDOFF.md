@@ -715,10 +715,10 @@ trackeado (`Trabajadores Activos al 01-04-2026.xlsx` — hallazgo nuevo, no
 detectado en la auditoría original: los otros 9 nunca se habían subido) salieron
 de tracking vía `git rm --cached` (archivos conservados en disco); `requirements.txt`
 creado con `pyodbc`, `pandas`, `openpyxl`, `keyring` pinneados y `PySide6`
-comentado para la Fase 4. Pendiente de decisión de Svei: purgar del historial
-la contraseña `Compac1` commiteada en `4620e7c` (ver Sección 10, punto 4) —
-no se hizo porque es acción destructiva sobre historial que requiere
-confirmación explícita.
+comentado para la Fase 4. La purga del historial (contraseña `Compac1` en
+`4620e7c`) queda diferida a la **Fase 7** (última del roadmap, acción
+destructiva), a propósito, para correrla cuando el árbol de trabajo ya esté
+limpio de secretos.
 
 **Fase 1 — Memoria de entorno y credenciales (Decisión 1).**
 Perfiles multi-empresa aislados; `profiles.json` sin secretos; contraseña en
@@ -766,6 +766,28 @@ valores verificados de la Sección 7.3.
 ContpaqI.** Enchufar categoría contable o botón "abrir en ContpaqI" por la
 costura de la Decisión 2, si Svei lo pide.
 
+**Fase 7 (ÚLTIMA — acción destructiva sobre el historial de git).**
+[R3] Purgar del historial de git la contraseña `Compac1` commiteada en
+`4620e7c` y cualquier `.xlsx` con PII que haya entrado alguna vez al historial.
+**Se deja para el final a propósito.** El diseño de las Fases 0.5→5 garantiza
+que, para cuando se llegue aquí, el **árbol de trabajo actual ya no contiene
+ningún secreto** (la contraseña vive en `keyring`, `config.json`/`profiles.json`
+y los `.xlsx` están fuera de tracking por `.gitignore`, y el código que
+manejaba texto plano — `load_known_passwords`/`save_known_password` — fue
+eliminado en la Fase 1). Es decir: cuando se corra la purga, **solo se está
+limpiando el pasado**, no compitiendo contra código vivo que siga escribiendo
+secretos. Eso vuelve la operación segura y de una sola vez.
+- Herramienta: `git filter-repo` (preferida) o BFG Repo-Cleaner.
+- Requiere: force-push al remoto y que cualquier clon existente se vuelva a
+  clonar (reescribir historial cambia todos los hashes posteriores).
+- **Disparador:** hacerlo **antes** de que el repo se vuelva público o se
+  distribuya a otro despacho — no antes. Mientras sea privado y personal, la
+  contraseña default pública de ContpaqI en el historial es de sensibilidad
+  baja (Sección 1.4).
+- **Criterio de salida:** `git log -p -S "Compac1"` no devuelve resultados;
+  ningún `.xlsx` aparece en `git log --all --name-only`; se rotó cualquier
+  contraseña **real** (no-default) que se hubiera usado.
+
 ---
 
 ## 10. Acciones inmediatas de seguridad y repo (Fase 0.5)
@@ -781,10 +803,12 @@ Hacer **antes** de escribir features:
    local ya ignorados). No deben poder subirse con un `git add .`.
 4. **Sobre la contraseña commiteada (`Compac1` en `4620e7c`):** es la
    contraseña *default pública* de ContpaqI, así que la sensibilidad real es
-   baja y **no** amerita reescribir el historial de golpe. Pero: (a) dejar de
-   versionar `config.json` (pasos 1–2), y (b) **si la app se va a distribuir o
-   el repo se hará público**, ahí sí purgar el historial (`git filter-repo` o
-   BFG) y rotar cualquier contraseña real que se haya usado.
+   baja y **no** amerita reescribir el historial ahora. Aquí (Fase 0.5) solo se
+   deja de versionar `config.json` (pasos 1–2). La purga del historial
+   (`git filter-repo`/BFG) se hace hasta el final, como **Fase 7** del roadmap,
+   justo antes de hacer el repo público o distribuirlo — ver Sección 9. Se
+   posterga a propósito para que, cuando se corra, el árbol de trabajo ya esté
+   limpio de secretos y la limpieza sea de una sola pasada.
 5. **Crear `requirements.txt`** con dependencias pinneadas:
    `pyodbc`, `pandas`, `openpyxl`, `keyring`, y (desde Fase 4) `PySide6`.
 6. **[R2] Reencuadrar (no eliminar) el "Auto-Buscar"** como parte de la
